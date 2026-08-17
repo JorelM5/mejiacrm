@@ -15,7 +15,7 @@ const DOW_ES = ["dom","lun","mar","mié","jue","vie","sáb"];
 let state = {
   clients: [],
   projects: [],
-  view: "clients",           // clients | clientDetail | calendar
+  view: "inicio",             // inicio | clients | clientDetail | calendar
   currentClientId: null,
   search: "",
   showCompleted: {},          // clientId -> bool
@@ -89,6 +89,45 @@ function projectsForClient(id, includeCompleted){
     .sort((a,b)=> (a.startDate||"").localeCompare(b.startDate||""));
 }
 
+/* ---------------- Money helpers ---------------- */
+function balanceOf(p){
+  const price = Number(p.price)||0, deposit = Number(p.deposit)||0;
+  return price - deposit;
+}
+function fmtMoney(n){
+  const v = Number(n)||0;
+  return v.toLocaleString("es-MX", {style:"currency", currency:"MXN", maximumFractionDigits: v%1===0 ? 0 : 2});
+}
+function totalPendingForClient(clientId){
+  return state.projects.filter(p=>p.clientId===clientId).reduce((sum,p)=>sum + Math.max(0, balanceOf(p)), 0);
+}
+function totalPendingGlobal(){
+  return state.projects.reduce((sum,p)=>sum + Math.max(0, balanceOf(p)), 0);
+}
+
+/* ---------------- WhatsApp helper ---------------- */
+function waLink(phone){
+  const digits = String(phone||"").replace(/\D/g,"");
+  if(!digits) return null;
+  const withCountry = digits.length === 10 ? "52"+digits : digits;
+  return `https://wa.me/${withCountry}`;
+}
+
+/* ---------------- Upcoming (próximos 7 días) ---------------- */
+function addDaysISO(iso, days){
+  const [y,m,d] = iso.split("-").map(Number);
+  const dt = new Date(y, m-1, d);
+  dt.setDate(dt.getDate()+days);
+  return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}-${String(dt.getDate()).padStart(2,"0")}`;
+}
+function getUpcoming(days){
+  const today = todayISO();
+  const limit = addDaysISO(today, days);
+  return state.projects
+    .filter(p => p.status !== "terminado" && p.startDate && p.startDate >= today && p.startDate <= limit)
+    .sort((a,b)=> (a.startDate||"").localeCompare(b.startDate||""));
+}
+
 /* ---------------- Conflict detection ---------------- */
 // Overlaps computed among ALL active ("activo") projects, across every client.
 function computeConflicts(){
@@ -124,12 +163,83 @@ function render(){
   } else {
     badge.classList.add("hidden");
   }
+  const upcomingCount = getUpcoming(7).length;
+  const upcomingBadge = document.getElementById("upcomingBadge");
+  if(upcomingCount){
+    upcomingBadge.textContent = upcomingCount;
+    upcomingBadge.classList.remove("hidden");
+  } else {
+    upcomingBadge.classList.add("hidden");
+  }
 
-  if(state.view === "clients") app.innerHTML = renderClientsView();
+  if(state.view === "inicio") app.innerHTML = renderInicioView(conflicts);
+  else if(state.view === "clients") app.innerHTML = renderClientsView();
   else if(state.view === "clientDetail") app.innerHTML = renderClientDetailView();
   else if(state.view === "calendar") app.innerHTML = renderCalendarView(conflicts);
 
   bindViewEvents();
+}
+
+/* ---------------- Inicio (dashboard) view ---------------- */
+function renderInicioView(conflicts){
+  if(state.clients.length === 0){
+    return `
+      <div class="empty-state">
+        <h3>Bienvenido a CRM Mejía</h3>
+        <p>Agrega tu primer cliente para empezar a registrar proyectos, cobros y fechas.</p>
+        <button class="btn btn-primary" id="emptyNewClient">+ Nuevo cliente</button>
+      </div>`;
+  }
+
+  const activeCount = state.projects.filter(p=>p.status!=="terminado").length;
+  const pending = totalPendingGlobal();
+  const upcoming = getUpcoming(7);
+
+  const statCards = `
+    <div class="stat-grid">
+      <div class="stat-card">
+        <div class="stat-value">${state.clients.length}</div>
+        <div class="stat-label">Clientes</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-value">${activeCount}</div>
+        <div class="stat-label">Proyectos activos</div>
+      </div>
+      <div class="stat-card ${pending>0?'stat-warn':''}">
+        <div class="stat-value">${fmtMoney(pending)}</div>
+        <div class="stat-label">Pendiente de cobro</div>
+      </div>
+      <div class="stat-card ${conflicts.length?'stat-danger':''}" id="statConflicts">
+        <div class="stat-value">${conflicts.length}</div>
+        <div class="stat-label">Fechas empalmadas</div>
+      </div>
+    </div>`;
+
+  const upcomingHtml = upcoming.length ? upcoming.map(p=>{
+    const c = clientById(p.clientId);
+    const bal = balanceOf(p);
+    return `
+    <div class="upcoming-row" data-client="${p.clientId}">
+      <div class="upcoming-date">
+        <span class="upcoming-daynum">${p.startDate.slice(8,10)}</span>
+        <span class="upcoming-monthabbr">${MONTHS_ES[Number(p.startDate.slice(5,7))-1].slice(0,3)}</span>
+      </div>
+      <div class="upcoming-main">
+        <div class="upcoming-client">${escapeHtml(c?c.name:"?")}</div>
+        <div class="upcoming-sub">${escapeHtml(p.title||p.category)} <span class="cat-chip" data-cat="${p.category}"><span class="cat-dot"></span>${p.category}</span></div>
+      </div>
+      ${bal>0 ? `<div class="upcoming-balance">${fmtMoney(bal)}<span>por cobrar</span></div>` : ""}
+    </div>`;
+  }).join("") : `<div class="empty-state" style="padding:32px 20px;"><h3>Nada agendado</h3><p>No tienes proyectos activos en los próximos 7 días.</p></div>`;
+
+  return `
+    <div class="section-head"><span class="section-title">Inicio</span></div>
+    ${statCards}
+    <div class="section-head" style="margin-top:26px;">
+      <span class="section-title" style="font-size:19px;">Próximos 7 días</span>
+    </div>
+    <div class="upcoming-list">${upcomingHtml}</div>
+  `;
 }
 
 /* ---------------- Clients list view ---------------- */
@@ -158,10 +268,12 @@ function renderClientsView(){
     const projects = state.projects.filter(p=>p.clientId===c.id && p.status !== "terminado");
     const cats = [...new Set(projects.map(p=>p.category))].slice(0,4);
     const totalActive = projects.length;
+    const pending = totalPendingForClient(c.id);
+    const wa = waLink(c.phone);
     return `
     <div class="client-card" data-id="${c.id}">
       <div class="client-card-name">${escapeHtml(c.name)}</div>
-      ${c.phone ? `<div class="client-card-row">${iconPhone()}${escapeHtml(c.phone)}</div>` : ""}
+      ${c.phone ? `<div class="client-card-row">${iconPhone()}${escapeHtml(c.phone)}${wa?`<a href="${wa}" target="_blank" rel="noopener" class="wa-btn" title="Abrir WhatsApp" onclick="event.stopPropagation()">${iconWhatsapp()}</a>`:""}</div>` : ""}
       ${c.email ? `<div class="client-card-row">${iconMail()}${escapeHtml(c.email)}</div>` : ""}
       ${c.address ? `<div class="client-card-row">${iconPin()}${escapeHtml(c.address)}</div>` : ""}
       <div class="client-card-meta">
@@ -170,6 +282,7 @@ function renderClientsView(){
           ${cats.map(cat=>`<span class="cat-chip" data-cat="${cat}"><span class="cat-dot"></span></span>`).join("")}
         </div>
       </div>
+      ${pending>0 ? `<div class="client-card-pending">${fmtMoney(pending)} por cobrar</div>` : ""}
     </div>`;
   }).join("");
 
@@ -207,6 +320,7 @@ function renderClientDetailView(){
           ${hasConflict ? `<span class="conflict-flag">${iconAlert()} choca con otra fecha</span>` : ""}
         </div>
         <div class="project-dates">${iconCalSmall()} ${fmtRange(p.startDate, p.endDate)}</div>
+        ${(Number(p.price)>0) ? `<div class="project-money">${fmtMoney(p.price)} total · ${fmtMoney(p.deposit)} anticipo${balanceOf(p)>0 ? ` · <strong>${fmtMoney(balanceOf(p))} pendiente</strong>` : ` · <span class="paid-tag">${iconCheck()} pagado</span>`}</div>` : ""}
         ${p.notes ? `<div class="project-notes">${escapeHtml(p.notes)}</div>` : ""}
       </div>
       <div class="project-actions">
@@ -223,10 +337,11 @@ function renderClientDetailView(){
     <div class="detail-header">
       <div class="detail-header-info">
         <h2>${escapeHtml(c.name)}</h2>
-        ${c.phone ? `<div class="detail-line">${iconPhone()}<a href="tel:${escapeHtml(c.phone)}" style="color:inherit;text-decoration:none;">${escapeHtml(c.phone)}</a></div>` : ""}
+        ${c.phone ? `<div class="detail-line">${iconPhone()}<a href="tel:${escapeHtml(c.phone)}" style="color:inherit;text-decoration:none;">${escapeHtml(c.phone)}</a>${waLink(c.phone)?`<a href="${waLink(c.phone)}" target="_blank" rel="noopener" class="wa-btn" title="Abrir WhatsApp">${iconWhatsapp()}</a>`:""}</div>` : ""}
         ${c.email ? `<div class="detail-line">${iconMail()}<a href="mailto:${escapeHtml(c.email)}" style="color:inherit;text-decoration:none;">${escapeHtml(c.email)}</a></div>` : ""}
         ${c.address ? `<div class="detail-line">${iconPin()}${escapeHtml(c.address)}</div>` : ""}
         ${c.notes ? `<div class="detail-notes">${escapeHtml(c.notes)}</div>` : ""}
+        ${totalPendingForClient(c.id)>0 ? `<div class="detail-pending">${iconAlertSmall()} ${fmtMoney(totalPendingForClient(c.id))} pendiente de cobro</div>` : ""}
       </div>
       <div class="detail-actions">
         <button class="btn btn-ghost btn-sm" id="editClientBtn">${iconEdit()} Editar</button>
@@ -350,6 +465,8 @@ function iconAlert(){return `<svg class="icon" width="18" height="18" viewBox="0
 function iconCalSmall(){return `<svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="none" style="width:13px;height:13px;"><rect x="3.5" y="5" width="17" height="15.5" rx="2" stroke="currentColor" stroke-width="1.8"/><path d="M3.5 9.5h17M8 3v4M16 3v4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`;}
 function iconChevronLeft(){return `<svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M15 5l-7 7 7 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;}
 function iconChevronRight(){return `<svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M9 5l7 7-7 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;}
+function iconWhatsapp(){return `<svg class="icon" width="15" height="15" viewBox="0 0 24 24" fill="currentColor" style="width:15px;height:15px;"><path d="M12.04 2C6.58 2 2.13 6.45 2.13 11.91c0 1.79.47 3.47 1.29 4.92L2 22l5.29-1.38a9.9 9.9 0 004.75 1.21h.01c5.46 0 9.91-4.45 9.91-9.91C21.96 6.45 17.5 2 12.04 2zm5.8 14.02c-.24.68-1.4 1.3-1.94 1.38-.5.08-1.12.11-1.8-.11-.42-.13-.95-.31-1.63-.6-2.87-1.24-4.74-4.13-4.88-4.32-.14-.19-1.17-1.56-1.17-2.97 0-1.41.74-2.1 1-2.39.26-.29.57-.36.76-.36.19 0 .38 0 .55.01.18.01.41-.07.64.49.24.57.81 1.98.88 2.12.07.14.12.31.02.5-.09.19-.14.31-.28.48-.14.17-.29.37-.42.5-.14.14-.28.29-.12.57.16.28.71 1.17 1.53 1.9 1.05.94 1.94 1.23 2.22 1.37.28.14.44.12.6-.07.16-.19.69-.8.88-1.08.19-.28.37-.23.62-.14.26.09 1.63.77 1.91.91.28.14.47.21.54.33.07.12.07.68-.17 1.36z"/></svg>`;}
+function iconAlertSmall(){return `<svg class="icon" width="15" height="15" viewBox="0 0 24 24" fill="none" style="width:15px;height:15px;color:var(--stamp);"><path d="M12 3l10 18H2L12 3z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M12 10v4" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><circle cx="12" cy="17" r="1" fill="currentColor"/></svg>`;}
 
 /* ---------------- Modal helpers ---------------- */
 function openModal(innerHtml){
@@ -427,9 +544,53 @@ function openClientForm(existing){
   });
 }
 
+/* ---------------- Quick add client modal ---------------- */
+function openQuickAddClient(){
+  openModal(`
+    <div class="modal-head"><h3>Alta rápida</h3><button class="modal-close">&times;</button></div>
+    <div class="modal-body">
+      <p style="font-size:12.5px;color:var(--ink-soft);margin-top:0;">Captura lo básico ahora; completa dirección y notas después desde la ficha del cliente.</p>
+      <div class="form-row">
+        <label>Nombre *</label>
+        <input type="text" id="q_name" placeholder="Nombre del cliente" autofocus>
+        <div class="error-text" id="q_err">El nombre es obligatorio.</div>
+      </div>
+      <div class="form-row">
+        <label>Teléfono</label>
+        <input type="tel" id="q_phone" placeholder="55 1234 5678">
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost modal-close">Cancelar</button>
+      <button class="btn btn-primary" id="quickSaveBtn">Crear cliente</button>
+    </div>
+  `);
+  document.getElementById("q_name").focus();
+  document.getElementById("quickSaveBtn").addEventListener("click", ()=>{
+    const name = document.getElementById("q_name").value.trim();
+    if(!name){
+      document.getElementById("q_name").classList.add("field-error");
+      document.getElementById("q_err").classList.add("show");
+      return;
+    }
+    const newClient = {
+      id: uid(), createdAt: new Date().toISOString(),
+      name, phone: document.getElementById("q_phone").value.trim(),
+      email:"", address:"", notes:""
+    };
+    state.clients.push(newClient);
+    state.currentClientId = newClient.id;
+    state.view = "clientDetail";
+    saveData();
+    closeModal();
+    render();
+    toast("Cliente creado — completa sus datos cuando puedas", "ok");
+  });
+}
+
 /* ---------------- Project form modal ---------------- */
 function openProjectForm(clientId, existing){
-  const p = existing || {title:"",category:CATEGORIES[0],startDate:todayISO(),endDate:"",status:"activo",notes:""};
+  const p = existing || {title:"",category:CATEGORIES[0],startDate:todayISO(),endDate:"",status:"activo",notes:"",price:"",deposit:""};
   openModal(`
     <div class="modal-head"><h3>${existing?"Editar proyecto":"Nuevo proyecto"}</h3><button class="modal-close">&times;</button></div>
     <div class="modal-body">
@@ -457,6 +618,20 @@ function openProjectForm(clientId, existing){
           <input type="date" id="p_end" value="${p.endDate||""}">
         </div>
       </div>
+      <div class="form-row form-grid2">
+        <div>
+          <label>Precio total</label>
+          <input type="number" id="p_price" min="0" step="0.01" inputmode="decimal" value="${p.price ?? ""}" placeholder="0">
+        </div>
+        <div>
+          <label>Anticipo</label>
+          <input type="number" id="p_deposit" min="0" step="0.01" inputmode="decimal" value="${p.deposit ?? ""}" placeholder="0">
+        </div>
+      </div>
+      <div class="form-row" id="balancePreview" style="display:none;">
+        <label>Saldo pendiente</label>
+        <div class="balance-preview" id="balancePreviewValue">$0</div>
+      </div>
       <div class="form-row">
         <label>Estado</label>
         <div class="status-toggle" id="statusToggle">
@@ -478,6 +653,24 @@ function openProjectForm(clientId, existing){
       <button class="btn btn-primary" id="saveProjectBtn">${existing?"Guardar cambios":"Crear proyecto"}</button>
     </div>
   `);
+
+  function refreshBalancePreview(){
+    const price = parseFloat(document.getElementById("p_price").value) || 0;
+    const deposit = parseFloat(document.getElementById("p_deposit").value) || 0;
+    const box = document.getElementById("balancePreview");
+    const val = document.getElementById("balancePreviewValue");
+    if(price>0){
+      box.style.display = "";
+      const bal = price - deposit;
+      val.textContent = fmtMoney(bal);
+      val.className = "balance-preview" + (bal>0 ? " is-due" : " is-paid");
+    } else {
+      box.style.display = "none";
+    }
+  }
+  document.getElementById("p_price").addEventListener("input", refreshBalancePreview);
+  document.getElementById("p_deposit").addEventListener("input", refreshBalancePreview);
+  refreshBalancePreview();
 
   document.querySelectorAll("#catGrid .cat-option").forEach(opt=>{
     opt.addEventListener("click", ()=>{
@@ -501,13 +694,15 @@ function openProjectForm(clientId, existing){
     let endDate = document.getElementById("p_end").value;
     const status = document.querySelector('input[name="p_status"]:checked').value;
     const notes = document.getElementById("p_notes").value.trim();
+    const price = document.getElementById("p_price").value === "" ? "" : parseFloat(document.getElementById("p_price").value);
+    const deposit = document.getElementById("p_deposit").value === "" ? "" : parseFloat(document.getElementById("p_deposit").value);
 
     if(endDate && startDate && endDate < startDate){
       toast("La fecha fin no puede ser antes de la fecha inicio", "err");
       return;
     }
 
-    const data = {title, category, startDate, endDate, status, notes};
+    const data = {title, category, startDate, endDate, status, notes, price, deposit};
     if(existing){
       Object.assign(existing, data);
       toast("Proyecto actualizado", "ok");
@@ -537,6 +732,46 @@ function openConfirm(title, message, onConfirm){
   });
 }
 
+/* ---------------- CSV export ---------------- */
+function csvEscape(v){
+  const s = String(v ?? "");
+  if(/[",\n]/.test(s)) return '"' + s.replace(/"/g,'""') + '"';
+  return s;
+}
+function exportCSV(){
+  const headers = ["Cliente","Teléfono","Correo","Dirección","Proyecto","Categoría","Fecha inicio","Fecha fin","Estado","Precio","Anticipo","Saldo","Notas del proyecto"];
+  const rows = [headers];
+  const sortedClients = state.clients.slice().sort((a,b)=>(a.name||"").localeCompare(b.name||"","es"));
+  sortedClients.forEach(c=>{
+    const projects = state.projects.filter(p=>p.clientId===c.id);
+    if(projects.length === 0){
+      rows.push([c.name,c.phone,c.email,c.address,"","","","","","","","",""]);
+    } else {
+      projects.forEach(p=>{
+        rows.push([
+          c.name, c.phone, c.email, c.address,
+          p.title, p.category, p.startDate||"", p.endDate||"",
+          p.status==="terminado"?"Terminado":"Activo",
+          p.price||"", p.deposit||"", (Number(p.price)>0? balanceOf(p):""),
+          p.notes||""
+        ]);
+      });
+    }
+  });
+  const csv = rows.map(r=>r.map(csvEscape).join(",")).join("\r\n");
+  const blob = new Blob(["\uFEFF"+csv], {type:"text/csv;charset=utf-8;"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  const stamp = new Date().toISOString().slice(0,10);
+  a.href = url;
+  a.download = `crm-mejia-clientes-${stamp}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  toast("CSV descargado", "ok");
+}
+
 /* ---------------- Backup modal ---------------- */
 function openBackupModal(){
   const clientCount = state.clients.length;
@@ -547,7 +782,12 @@ function openBackupModal(){
       <div class="backup-section">
         <h4>Exportar respaldo</h4>
         <p>Descarga un archivo .json con ${clientCount} cliente${clientCount===1?'':'s'} y ${projectCount} proyecto${projectCount===1?'':'s'}. Guárdalo en Drive, WhatsApp o correo para pasarlo a otro dispositivo.</p>
-        <button class="btn btn-primary btn-block" id="exportBtn">${iconDownload()} Descargar respaldo</button>
+        <button class="btn btn-primary btn-block" id="exportBtn">${iconDownload()} Descargar respaldo (.json)</button>
+      </div>
+      <div class="backup-section">
+        <h4>Exportar a Excel / CSV</h4>
+        <p>Descarga una tabla .csv con todos tus clientes y proyectos — ábrela en Excel, Google Sheets o Numbers. Útil para cuentas o como respaldo legible.</p>
+        <button class="btn btn-ghost btn-block" id="exportCsvBtn">${iconDownload()} Descargar CSV</button>
       </div>
       <div class="backup-section">
         <h4>Importar respaldo</h4>
@@ -573,6 +813,8 @@ function openBackupModal(){
     URL.revokeObjectURL(url);
     toast("Respaldo descargado", "ok");
   });
+
+  document.getElementById("exportCsvBtn").addEventListener("click", exportCSV);
 
   const fileDrop = document.getElementById("fileDrop");
   const fileInput = document.getElementById("fileInput");
@@ -613,6 +855,22 @@ function iconUpload(){return `<svg class="icon" width="18" height="18" viewBox="
 
 /* ---------------- Event binding ---------------- */
 function bindViewEvents(){
+  // Inicio view
+  document.querySelectorAll(".upcoming-row").forEach(row=>{
+    row.addEventListener("click", ()=>{
+      state.currentClientId = row.dataset.client;
+      state.view = "clientDetail";
+      render();
+      window.scrollTo({top:0,behavior:"smooth"});
+    });
+  });
+  const statConflicts = document.getElementById("statConflicts");
+  if(statConflicts) statConflicts.addEventListener("click", ()=>{
+    state.view = "calendar";
+    render();
+    window.scrollTo({top:0});
+  });
+
   // Clients view
   document.querySelectorAll(".client-card").forEach(card=>{
     card.addEventListener("click", ()=>{
@@ -719,12 +977,13 @@ function bindChrome(){
   document.querySelectorAll(".tab").forEach(tab=>{
     tab.addEventListener("click", ()=>{
       state.view = tab.dataset.view;
-      if(state.view === "clients") state.currentClientId = null;
+      if(state.view === "clients" || state.view === "inicio") state.currentClientId = null;
       render();
       window.scrollTo({top:0});
     });
   });
   document.getElementById("btnNewClient").addEventListener("click", ()=>openClientForm(null));
+  document.getElementById("btnQuickAdd").addEventListener("click", openQuickAddClient);
   document.getElementById("btnBackup").addEventListener("click", openBackupModal);
   const search = document.getElementById("searchInput");
   search.addEventListener("input", (e)=>{
@@ -737,9 +996,21 @@ function bindChrome(){
   });
 }
 
+/* ---------------- PWA: service worker ---------------- */
+function registerServiceWorker(){
+  if("serviceWorker" in navigator){
+    window.addEventListener("load", ()=>{
+      navigator.serviceWorker.register("./sw.js").catch(err=>{
+        console.warn("No se pudo registrar el service worker", err);
+      });
+    });
+  }
+}
+
 /* ---------------- Init ---------------- */
 loadData();
 bindChrome();
 render();
+registerServiceWorker();
 
 })();
